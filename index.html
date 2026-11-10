@@ -160,7 +160,7 @@ function kelas(){
     <button class="btn ghost" onclick="$('#csvIn').click()">Impor CSV</button>
     <button class="btn ghost" onclick="exportKelas('${selClass}')">Ekspor CSV</button>
     <button class="btn ghost" onclick="shareKelas('${selClass}')">Bagikan</button>
-    <button class="btn gold" onclick="syncKelas('${selClass}')">Sinkron ke Google Sheet</button>
+    <button class="btn gold" onclick="sinkronKelasDuaArah('${selClass}')">Sinkron dua arah</button>
     <button class="btn ghost" onclick="window.print()">Cetak</button>
     <input type="file" id="csvIn" accept=".csv,text/csv" hidden onchange="imporCSV(this.files[0],'${selClass}')">
   </div>
@@ -292,7 +292,7 @@ function guru(){
   <td>${t.nfc?'<span class="tag ok">Kartu terdaftar</span>':'<span class="tag">Belum ada kartu</span>'}</td>
   <td>${Object.keys(ST).map(k=>`<button class="st ${cur===k?'on '+k:''}" onclick="setGuru('${t.id}','${k}')">${k}</button>`).join('')}</td>
   <td class="noprint"><button class="btn ghost sm" onclick="formGuru('${t.id}')">Ubah</button> <button class="btn ghost sm" onclick="db.teachers=db.teachers.filter(x=>x.id!=='${t.id}');save();render()">Hapus</button></td></tr>`}).join('');
-  return `<div class="head"><div><h2>Presensi Guru dan Staff</h2><p>${d}</p></div><div class="row noprint"><button class="btn" onclick="formGuru()">+ Tambah guru/staff</button><button class="btn gold" onclick="syncGuru()">Sinkron ke Google Sheet</button></div></div>
+  return `<div class="head"><div><h2>Presensi Guru dan Staff</h2><p>${d}</p></div><div class="row noprint"><button class="btn" onclick="formGuru()">+ Tambah guru/staff</button><button class="btn gold" onclick="sinkronGuruDuaArah()">Sinkron dua arah</button></div></div>
   <div class="panel" style="padding:0"><table><thead><tr><th>No</th><th>Nama</th><th>NFC</th><th>Status hari ini</th><th class="noprint"></th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="muted">Belum ada data guru.</td></tr>'}</tbody></table></div>`;
 }
 function setGuru(id,code){db.teacherAtt[today()]??={};db.teacherAtt[today()][id]=code;save();render()}
@@ -439,7 +439,7 @@ function pengaturan(){
    <div class="panel"><h3 style="margin-bottom:12px">Google Sheet</h3>
     <div class="field"><label>Client ID OAuth</label><input style="width:100%" value="${esc(s.clientId)}" onchange="db.settings.clientId=this.value.trim();save()"></div>
     <div class="field"><label>ID Spreadsheet</label><input style="width:100%" value="${esc(s.sheetId)}" onchange="db.settings.sheetId=this.value.trim();save()"></div>
-    <div class="row"><button class="btn" onclick="loginGoogle()">Hubungkan Google</button><button class="btn gold" onclick="syncSemua()">Sinkron semua kelas</button></div>
+    <div class="row"><button class="btn" onclick="loginGoogle()">Hubungkan Google</button><button class="btn gold" onclick="sinkronDuaArah()">Sinkron dua arah</button> <button class="btn ghost" onclick="syncSemua()">Kirim saja ke Sheet</button></div>
     <p class="muted" style="font-size:13px">Setiap kelas disinkronkan ke tab dengan nama kelasnya (misalnya tab "5D").</p></div>
    <div class="panel"><h3 style="margin-bottom:12px">Data</h3>
     <p class="muted">Data tersimpan di perangkat ini. Buat cadangan secara berkala di menu Laporan.</p>
@@ -466,15 +466,15 @@ async function gapi(path,opt={}){
 function buildSheet(k){
   const list=sorted(k);
   const dates=[...new Set(Object.keys(db.attendance).filter(d=>db.attendance[d][k]))].sort();
-  const head=['NIS','Nama','JK','ID NFC',...dates.flatMap(d=>[d+' Status',d+' Jam'])];
-  const body=list.map(s=>[s.nis,s.name,s.jk,s.nfc,...dates.flatMap(d=>[ST[statusOf(k,s.id,d)]||'',(db.times?.[d]||{})[s.id]||''])]);
+  const head=['ID','NIS','Nama','JK','ID NFC',...dates.flatMap(d=>[d+' Status',d+' Jam'])];
+  const body=list.map(s=>[s.id,s.nis,s.name,s.jk,s.nfc,...dates.flatMap(d=>[ST[statusOf(k,s.id,d)]||'',(db.times?.[d]||{})[s.id]||''])]);
   return [head,...body];
 }
 function buildSheetGuru(){
   const list=db.teachers.slice().sort((a,b)=>a.name.localeCompare(b.name));
   const dates=[...new Set(Object.keys(db.teacherAtt))].sort();
-  const head=['NIP','Nama','Jabatan','ID NFC',...dates.flatMap(d=>[d+' Status',d+' Jam'])];
-  const body=list.map(t=>[t.nip,t.name,t.jabatan||'Guru',t.nfc,...dates.flatMap(d=>[ST[(db.teacherAtt[d]||{})[t.id]]||'',(db.times?.[d]||{})[t.id]||''])]);
+  const head=['ID','NIP','Nama','Jabatan','ID NFC',...dates.flatMap(d=>[d+' Status',d+' Jam'])];
+  const body=list.map(t=>[t.id,t.nip,t.name,t.jabatan||'Guru',t.nfc,...dates.flatMap(d=>[ST[(db.teacherAtt[d]||{})[t.id]]||'',(db.times?.[d]||{})[t.id]||''])]);
   return [head,...body];
 }
 async function syncTab(name,values){
@@ -488,6 +488,79 @@ async function syncGuru(){
   if(!db.teachers.length)return toast('Belum ada data guru dan staff');
   try{await syncTab('Guru & Staff',buildSheetGuru());toast('Guru dan staff tersinkron ke Google Sheet')}
   catch(e){toast('Sinkron gagal: '+e.message)}
+}
+const LABEL={Hadir:'H',Sakit:'S',Izin:'I',Alpa:'A',H:'H',S:'S',I:'I',A:'A'};
+const JAM=/^\d{1,2}:\d{2}$/;
+async function ambilTab(name){
+  const r=await gapi(`/values/${encodeURIComponent(`'${name}'!A1:ZZ`)}`);
+  const v=r.values||[];
+  if(v.length<2)return null;
+  const h=v[0].map(x=>String(x).trim());
+  const rows=v.slice(1).map(row=>{const o={};h.forEach((c,i)=>o[c]=String(row[i]??'').trim());return o});
+  return {h,rows};
+}
+// Sheet menang jika kedua sisi berbeda. Sel kosong di sheet tidak menghapus data lokal.
+async function tarikKelas(k){
+  const t=await ambilTab(k);if(!t)return 0;
+  const list=db.classes[k]??=[];
+  const dates=t.h.filter(c=>/^\d{4}-\d{2}-\d{2} Status$/.test(c)).map(c=>c.slice(0,10));
+  for(const o of t.rows){
+    const nama=o['Nama'];if(!nama)continue;
+    let s=(o['ID']&&list.find(x=>x.id===o['ID']))||(o['NIS']&&list.find(x=>x.nis===o['NIS']))||list.find(x=>x.name.toLowerCase()===nama.toLowerCase());
+    if(!s){s={id:rid(),nis:'',name:'',jk:'L',nfc:''};list.push(s)}
+    s.name=nama;s.nis=o['NIS']||'';s.jk=(o['JK']||'L').toUpperCase().startsWith('P')?'P':'L';
+    if(o['ID NFC'])s.nfc=normUid(o['ID NFC']);
+    for(const d of dates){
+      const c=LABEL[o[d+' Status']];
+      if(c){db.attendance[d]??={};db.attendance[d][k]??={};db.attendance[d][k][s.id]=c}
+      if(JAM.test(o[d+' Jam']||'')){db.times??={};db.times[d]??={};db.times[d][s.id]=o[d+' Jam']}
+    }
+  }
+  save();return t.rows.length;
+}
+async function tarikGuru(){
+  const t=await ambilTab('Guru & Staff');if(!t)return 0;
+  const dates=t.h.filter(c=>/^\d{4}-\d{2}-\d{2} Status$/.test(c)).map(c=>c.slice(0,10));
+  for(const o of t.rows){
+    const nama=o['Nama'];if(!nama)continue;
+    let x=(o['ID']&&db.teachers.find(y=>y.id===o['ID']))||(o['NIP']&&db.teachers.find(y=>y.nip===o['NIP']))||db.teachers.find(y=>y.name.toLowerCase()===nama.toLowerCase());
+    if(!x){x={id:rid(),name:'',nip:'',jabatan:'Guru',nfc:''};db.teachers.push(x)}
+    x.name=nama;x.nip=o['NIP']||'';x.jabatan=o['Jabatan']==='Staff'?'Staff':'Guru';
+    if(o['ID NFC'])x.nfc=normUid(o['ID NFC']);
+    for(const d of dates){
+      const c=LABEL[o[d+' Status']];
+      if(c){db.teacherAtt[d]??={};db.teacherAtt[d][x.id]=c}
+      if(JAM.test(o[d+' Jam']||'')){db.times??={};db.times[d]??={};db.times[d][x.id]=o[d+' Jam']}
+    }
+  }
+  save();return t.rows.length;
+}
+async function sinkronKelasDuaArah(k){
+  if(!tok)return toast('Hubungkan Google dulu di Pengaturan');
+  try{
+    const meta=await gapi('?fields=sheets.properties.title');
+    if(meta.sheets.some(s=>s.properties.title===k))await tarikKelas(k);
+    await syncKelas(k);render();
+  }catch(e){toast('Sinkron gagal: '+e.message)}
+}
+async function sinkronGuruDuaArah(){
+  if(!tok)return toast('Hubungkan Google dulu di Pengaturan');
+  try{
+    const meta=await gapi('?fields=sheets.properties.title');
+    if(meta.sheets.some(s=>s.properties.title==='Guru & Staff'))await tarikGuru();
+    await syncGuru();render();
+  }catch(e){toast('Sinkron gagal: '+e.message)}
+}
+async function sinkronDuaArah(){
+  if(!tok)return toast('Hubungkan Google dulu di Pengaturan');
+  try{
+    const meta=await gapi('?fields=sheets.properties.title');
+    const ada=new Set(meta.sheets.map(s=>s.properties.title));
+    for(const k of CLASSES)if(ada.has(k))await tarikKelas(k);
+    if(ada.has('Guru & Staff'))await tarikGuru();
+    await syncSemua();render();
+    toast('Sinkron dua arah selesai');
+  }catch(e){toast('Sinkron gagal: '+e.message)}
 }
 async function syncKelas(k){
   try{

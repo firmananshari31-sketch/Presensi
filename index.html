@@ -149,8 +149,14 @@ function kelas(){
     <td class="noprint"><button class="btn ghost sm" onclick="formSiswa('${selClass}','${x.id}')">Ubah</button> <button class="btn ghost sm" onclick="hapusSiswa('${selClass}','${x.id}')">Hapus</button></td></tr>`}).join('');
   return `<div class="head"><div><h2>Kelas ${selClass}</h2><p>${list.length} siswa · ${selDate}</p></div>
   <div class="row noprint"><button class="btn ghost" onclick="selClass='';render()">← Semua kelas</button>${dateBar()}</div></div>
+  ${daftarAktif&&daftarKelas===selClass?`<div class="panel" style="margin-bottom:14px;border-color:var(--gold)">
+    <b>Daftarkan kartu · sisa ${daftarQueue.length} siswa</b>
+    <h3 style="margin:6px 0">${esc((db.classes[selClass].find(x=>x.id===daftarQueue[0])||{}).name||'')}</h3>
+    <p class="muted" style="margin:0 0 12px">Tempelkan kartu siswa ini ke HP. Setelah terbaca, otomatis lanjut ke siswa berikutnya.</p>
+    <div class="row"><button class="btn ghost" onclick="lewatiDaftar()">Lewati</button><button class="btn danger" onclick="hentikanDaftar()">Selesai</button></div></div>`:''}
   <div class="row noprint" style="margin-bottom:14px">
     <button class="btn" onclick="formSiswa('${selClass}')">+ Tambah siswa</button>
+    <button class="btn gold" onclick="mulaiDaftar('${selClass}')">Daftarkan kartu</button>
     <button class="btn ghost" onclick="$('#csvIn').click()">Impor CSV</button>
     <button class="btn ghost" onclick="exportKelas('${selClass}')">Ekspor CSV</button>
     <button class="btn ghost" onclick="shareKelas('${selClass}')">Bagikan</button>
@@ -199,7 +205,7 @@ function scan(){
   <div class="panel" style="margin-top:18px"><h3 style="margin-bottom:10px">Riwayat scan terakhir</h3>
   <div class="log">${log.map(l=>`<div><span><b>${esc(l.name)}</b> <span class="muted">${esc(l.kelas)}</span></span><span class="muted">${l.time}</span></div>`).join('')||'<p class="muted">Belum ada scan.</p>'}</div></div>`;
 }
-let nfcAktif=false,wakeLock=null;
+let nfcAktif=false,wakeLock=null,daftarAktif=false,daftarKelas='',daftarQueue=[];
 async function mulaiScan(){
   if(!('NDEFReader' in window))return toast('Web NFC tidak didukung di perangkat ini. Gunakan Chrome Android atau pembaca USB.');
   nfcAktif=true;
@@ -217,6 +223,44 @@ async function aktifkanScan(){
     r.onreadingerror=()=>{if(nfcAktif)toast('Kartu tidak terbaca, coba lagi.')};
   }catch(err){nfcAktif=false;toast('Izin NFC ditolak atau gagal: '+err.message);render()}
 }
+function cariUid(uid){
+  for(const k of CLASSES)for(const s of db.classes[k]||[])if(s.nfc===uid)return {nama:s.name,kelas:'Kelas '+k};
+  for(const t of db.teachers)if(t.nfc===uid)return {nama:t.name,kelas:t.jabatan||'Guru'};
+  return null;
+}
+function mulaiDaftar(k){
+  if(!('NDEFReader' in window))return toast('Mode daftar kartu hanya tersedia di Chrome Android');
+  const antrian=sorted(k).filter(s=>!s.nfc).map(s=>s.id);
+  if(!antrian.length)return toast('Semua siswa di kelas ini sudah punya kartu');
+  daftarKelas=k;daftarQueue=antrian;daftarAktif=true;
+  if('wakeLock' in navigator&&!wakeLock){
+    navigator.wakeLock.request('screen').then(l=>{wakeLock=l;l.addEventListener('release',()=>{wakeLock=null})}).catch(()=>{});
+  }
+  aktifkanBacaDaftar();render();
+}
+async function aktifkanBacaDaftar(){
+  try{
+    const r=new NDEFReader();
+    await r.scan();
+    r.onreading=e=>{if(daftarAktif)daftarKartu(e.serialNumber)};
+    r.onreadingerror=()=>{if(daftarAktif)toast('Kartu tidak terbaca, coba lagi.')};
+  }catch(err){daftarAktif=false;toast('Gagal memulai: '+err.message);render()}
+}
+function daftarKartu(raw){
+  const uid=normUid(raw);if(!uid||!daftarAktif||!daftarQueue.length)return;
+  const sudah=cariUid(uid);
+  if(sudah)return toast(`Kartu ini sudah dipakai ${sudah.nama} (${sudah.kelas})`);
+  const s=(db.classes[daftarKelas]||[]).find(x=>x.id===daftarQueue.shift());
+  if(s){s.nfc=uid;save();toast(`${s.name} terdaftar`)}
+  if(!daftarQueue.length){daftarAktif=false;toast('Semua siswa di kelas ini sudah punya kartu')}
+  render();
+}
+function lewatiDaftar(){daftarQueue.shift();if(!daftarQueue.length)daftarAktif=false;render()}
+function hentikanDaftar(){
+  daftarAktif=false;daftarQueue=[];
+  if(!nfcAktif&&wakeLock){wakeLock.release();wakeLock=null}
+  render();
+}
 function hentikanScan(){
   nfcAktif=false;
   if(wakeLock){wakeLock.release();wakeLock=null}
@@ -224,6 +268,7 @@ function hentikanScan(){
 }
 // Saat layar kembali menyala atau Chrome kembali ke depan, pindai dan kunci layar diaktifkan ulang
 document.addEventListener('visibilitychange',async()=>{
+  if(document.visibilityState==='visible'&&daftarAktif)await aktifkanBacaDaftar();
   if(document.visibilityState==='visible'&&nfcAktif){await aktifkanScan();if(view==='scan')render()}
 });
 async function bacaNfc(id){

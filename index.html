@@ -276,7 +276,48 @@ async function bacaNfc(id){
   try{const r=new NDEFReader();await r.scan();toast('Tempelkan kartu...');r.onreading=e=>{$('#'+id).value=normUid(e.serialNumber);toast('Kartu terbaca')}}
   catch(err){toast('Gagal membaca: '+err.message)}
 }
+const JEDA_TAP=60*60*1000;
+function catatScan(id,nama,labelKelas){
+  const ms=Date.now(),d=today();
+  const jam=new Date(ms).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
+  db.lastTap??={};db.scans??={};db.times??={};
+  const terakhir=db.lastTap[id]||0;
+  if(ms-terakhir<JEDA_TAP){
+    const sisa=Math.ceil((JEDA_TAP-(ms-terakhir))/60000);
+    toast(`${nama} sudah tercatat. Tap berikutnya bisa ${sisa} menit lagi`);
+    return false;
+  }
+  db.lastTap[id]=ms;
+  db.scans[d]??={};(db.scans[d][id]??=[]).push(jam);
+  db.times[d]??={};
+  if(!db.times[d][id])db.times[d][id]=jam; // jam pertama hari itu, tidak ditimpa
+  db.log.push({name:nama,kelas:labelKelas,time:jam});
+  save();return true;
+}
+function riwayatScan(id,dari,sampai){
+  const out=[];
+  for(const d of Object.keys(db.scans||{}).sort()){
+    if(d<dari||d>sampai)continue;
+    const j=((db.scans[d]||{})[id])||[];
+    if(j.length)out.push(`${d} ${j.join(', ')}`);
+  }
+  return out.join('; ');
+}
 function prosesUid(raw){
+  const uid=normUid(raw);if(!uid)return;
+  for(const t of db.teachers)if(t.nfc===uid){
+    if(!catatScan(t.id,t.name,t.jabatan||'Guru'))return;
+    const d=today();db.teacherAtt[d]??={};db.teacherAtt[d][t.id]='H';save();
+    toast(`${t.jabatan||'Guru'} ${t.name}: hadir`);return render();
+  }
+  for(const k of CLASSES)for(const s of db.classes[k]||[])if(s.nfc===uid){
+    if(!catatScan(s.id,s.name,'Kelas '+k))return;
+    const d=today();db.attendance[d]??={};db.attendance[d][k]??={};db.attendance[d][k][s.id]='H';save();
+    toast(`${s.name} tercatat hadir`);return render();
+  }
+  toast('Kartu belum terdaftar: '+uid);
+}
+function prosesUidLama(raw){
   const uid=normUid(raw);if(!uid)return;
   const now=new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
   for(const t of db.teachers)if(t.nfc===uid){db.teacherAtt[today()]??={};db.teacherAtt[today()][t.id]='H';db.times??={};db.times[today()]??={};db.times[today()][t.id]=now;db.log.push({name:t.name,kelas:t.jabatan||'Guru',time:now});save();toast(`${t.jabatan||'Guru'} ${t.name}: hadir`);return render()}
@@ -353,8 +394,8 @@ async function share(name,text){
 }
 function rekapRows(k){
   const d=selDate;const list=k?sorted(k):CLASSES.flatMap(c=>sorted(c).map(s=>({...s,kelas:c})));
-  const head=['Kelas','NIS','Nama','JK','Status',"Tanggal"];
-  const body=list.map(s=>[s.kelas||k,s.nis,s.name,s.jk,ST[statusOf(s.kelas||k,s.id,d)]||'Belum absen',d]);
+  const head=['Kelas','NIS','Nama','JK','Status','Tanggal','Jam hadir','Semua scan'];
+  const body=list.map(s=>[s.kelas||k,s.nis,s.name,s.jk,ST[statusOf(s.kelas||k,s.id,d)]||'Belum absen',d,(db.times?.[d]||{})[s.id]||'',((db.scans?.[d]||{})[s.id]||[]).join(', ')]);
   return [head,...body];
 }
 function exportKelas(k){download(`presensi-kelas-${k}-${selDate}.csv`,csvOf(rekapRows(k)))}
@@ -373,7 +414,7 @@ function rekapRentang(){
   }
   const kel=($('#rkKelas')||{}).value||'';
   const ks=kel?[kel]:CLASSES;
-  const head=['Kelas','NIS','Nama','JK','Hadir','Sakit','Izin','Alpa','Hari tercatat','% Hadir'];
+  const head=['Kelas','NIS','Nama','JK','Hadir','Sakit','Izin','Alpa','Hari tercatat','% Hadir','Riwayat scan (tanggal jam)'];
   const rows=[];
   for(const k of ks)for(const s of sorted(k)){
     const c={H:0,S:0,I:0,A:0};let tot=0;
@@ -382,7 +423,7 @@ function rekapRentang(){
       const v=statusOf(k,s.id,d);
       if(v){c[v]++;tot++}
     }
-    rows.push([k,s.nis,s.name,s.jk==='P'?'P':'L',c.H,c.S,c.I,c.A,tot,tot?Math.round(c.H/tot*100)+'%':'-']);
+    rows.push([k,s.nis,s.name,s.jk==='P'?'P':'L',c.H,c.S,c.I,c.A,tot,tot?Math.round(c.H/tot*100)+'%':'-',riwayatScan(s.id,dari,sampai)]);
   }
   return {name:`rekap-${kel?'kelas-'+kel+'-':''}${dari}_${sampai}.csv`,rows:[head,...rows]};
 }
@@ -399,7 +440,7 @@ function rekapGuru(){
     if(!dari||!sampai||dari>sampai)return null;
   }
   const jab=($('#rgJabatan')||{}).value||'';
-  const head=['Jabatan','NIP','Nama','Hadir','Sakit','Izin','Alpa','Hari tercatat','% Hadir'];
+  const head=['Jabatan','NIP','Nama','Hadir','Sakit','Izin','Alpa','Hari tercatat','% Hadir','Riwayat scan (tanggal jam)'];
   const rows=db.teachers.filter(t=>!jab||(t.jabatan||'Guru')===jab)
     .slice().sort((a,b)=>a.name.localeCompare(b.name))
     .map(t=>{
@@ -409,7 +450,7 @@ function rekapGuru(){
         const v=(db.teacherAtt[d]||{})[t.id];
         if(v){c[v]++;tot++}
       }
-      return [t.jabatan||'Guru',t.nip,t.name,c.H,c.S,c.I,c.A,tot,tot?Math.round(c.H/tot*100)+'%':'-'];
+      return [t.jabatan||'Guru',t.nip,t.name,c.H,c.S,c.I,c.A,tot,tot?Math.round(c.H/tot*100)+'%':'-',riwayatScan(t.id,dari,sampai)];
     });
   return {name:`rekap-guru-${jab?jab.toLowerCase()+'-':''}${dari}_${sampai}.csv`,rows:[head,...rows]};
 }
